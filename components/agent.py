@@ -39,12 +39,15 @@ class ReplayMemory:
         return len(self.memory)
 
 class DQN(nn.Module):
-    def __init__(self, model: nn.Sequential, criterion: Any, optimiser: Any) -> None:
+    def __init__(self, model: nn.Sequential, criterion: Any, optimiser: Any, *, lr=0.001) -> None:
         super(DQN, self).__init__()
 
         self.model = model
-        self.criterion = criterion
-        self.optimiser = optimiser
+        self.criterion = criterion()
+        self.optimiser = optimiser(self.parameters(), lr=lr)
+
+        self.in_features = model[0].in_features
+        self.out_features = model[-1].out_features
 
     def update(self, x: Tensor, y: Tensor) -> None:
         self.train()
@@ -55,15 +58,79 @@ class DQN(nn.Module):
         self.eval()
 
     def save(self, path: str) -> None:
-        torch.save(self.model.state_dict(), path)
+        torch.save(self.state_dict(), path)
     
     def load(self, path: str) -> None:
-        self.model.load_state_dict(torch.load(path))
+        self.load_state_dict(torch.load(path))
 
     def forward(self, x: Tensor) -> Tensor:
         return self.model(x)
 
+class DuelingDQN(nn.Module):
+    def __init__(
+            self,
+            F: nn.Sequential,
+            V: nn.Sequential,
+            A: nn.Sequential,
+            criterion: Any,
+            optimiser: Any,
+            *,
+            lr: float = 0.001
+    ) -> None:
+        super(DuelingDQN, self).__init__()
+
+        self.F = F
+        self.V = V
+        self.A = A
+        
+        self.criterion = criterion()
+        self.optimiser = optimiser(self.parameters(), lr=lr)
+        
+        self.in_features = F[0].in_features
+        self.out_features = A[-1].out_features
+
+    def update(self, x: Tensor, y: Tensor) -> None:
+        self.train()
+        self.optimiser.zero_grad()
+        loss = self.criterion(self(x), y)
+        loss.backward()
+        self.optimiser.step()
+        self.eval()
+
+    def save(self, path: str) -> None:
+        torch.save(self.state_dict(), path)
+    
+    def load(self, path: str) -> None:
+        self.load_state_dict(torch.load(path))
+
+    def forward(self, x: Tensor) -> Tensor:
+        features = self.F(x)
+        value = self.V(features)
+        advantage = self.A(features)
+
+        return value + advantage - advantage.mean(dim=-1).unsqueeze(dim=-1)
+
 class DQNAgent(Agent):
+    """
+    A Deep Q-Network (DQN) agent that interacts with an environment, learns from experience, and uses epsilon-greedy policy for action selection.
+    ### Parameters:
+        - dqn (`DQN`): The DQN model to be used by the agent for action selection and training.
+        - memory (`ReplayMemory`): The replay memory buffer used to store and sample experiences for training.
+        - gamma (`float`): The discount factor for future rewards in the Q-learning update.
+        - eps (`float`): The initial exploration rate for epsilon-greedy action selection.
+        - eps_decay (`float`): The decay rate for reducing the exploration rate over time.
+        - eps_min (`float`): The minimum exploration rate allowed.
+        - double (`bool`): Whether to use double DQN algorithm.
+        - tau (`float`): The soft update parameter controlling the interpolation between the policy and target DQNs. Only matters if double DQN is enabled.
+
+    ### Methods:
+        - `act`: Selects an action based on the epsilon-greedy policy using the current Q-values from the DQN model.
+        - `remember`: Stores a new experience (state, action, reward, next state, and done) in the replay memory.
+        - `replay`: Samples experiences from the replay memory and performs a Q-learning update on the DQN model.
+        - `train`: Trains the DQN agent in the given environment for the specified number of episodes.
+        - `evaluate`: Evaluates the DQN agent in the given environment for the specified number of episodes and returns the average score.
+    """
+    
     def __init__(
             self,
             dqn: DQN,
@@ -72,35 +139,68 @@ class DQNAgent(Agent):
             gamma: float = 0.95,
             eps: float = 1,
             eps_decay: float = 0.995,
-            eps_min: float = 0.05,
+            eps_min: float = 0.1,
+            double: bool = False,
+            tau: float = 0.05
     ) -> None:
+        
+        self.double = double
 
-        self.dqn = dqn
+        self.policy_dqn = dqn
+        self.target_dqn = deepcopy(dqn) if double else dqn
         self.memory = memory
 
         self.gamma = gamma
         self.eps = eps
         self.eps_decay = eps_decay
         self.eps_min = eps_min
+        self.tau = tau
 
     def act(self, state: ArrayLike) -> int:
+        """
+        Select an action to take based on a given state.
+        ### Parameters:
+        - state (`ArrayLike`): The current state of the environment represented as an array-like object.
+        ### Returns:
+        - The chosen action represented as an integer (`int`)
+        """
+
         # Apply epsilon (random action chance)
         if random.random() <= self.eps:
-            n_actions = self.dqn.model[-1].out_features
-            return random.randrange(n_actions)
+            return random.randrange(self.policy_dqn.out_features)
 
         # Choose action
         with torch.no_grad():
             state = torch.tensor(state)
-            action_values = self.dqn(state)
-        action = action_values.argmax().item()
+            action_values = self.policy_dqn(state)
+            action = action_values.argmax().item()
 
         return action
 
     def remember(self, state: ArrayLike, action: int, reward: int, next_state: ArrayLike, done: bool) -> None:
+        """
+        Store the experience in the agent's replay memory buffer.
+        ### Parameters:
+        - state (`ArrayLike`): The current state of the environment represented as an array-like object.
+        - action (`int`): The action taken by the agent represented as an integer.
+        - reward (`int`): The reward received after taking the action.
+        - next_state (`ArrayLike`): The resulting state after taking the action represented as an array-like object.
+        - done (`bool`): A boolean indicating whether the episode has ended after taking the action.
+        ### Returns:
+        - `None`
+        """
+
         self.memory.push(state, action, reward, next_state, done)
 
     def replay(self, batch_size: int) -> None:
+        """
+        Update the DQN model using a batch of randomly sampled experiences from the replay memory.
+        ### Parameters:
+        - batch_size (`int`): The number of transitions (experiences) to sample from the replay memory for the update.
+        ### Returns:
+        - `None`
+        """
+
         # Skip if there's not enough memory samples
         if len(self.memory) < batch_size:
             return
@@ -111,15 +211,20 @@ class DQNAgent(Agent):
             lambda x: torch.tensor(np.array(x)), zip(*transitions)
         )
 
-        # Calculate target values
+        # Calculate the target values
         with torch.no_grad():
-            targets = self.dqn(states)
+            next_actions = self.policy_dqn(next_states).argmax(dim=-1)
+            targets = self.target_dqn(states)
             targets[torch.arange(batch_size), actions] = torch.where(
-                dones, rewards, rewards + self.gamma * self.dqn(next_states).max(dim=1).values
+                dones,
+                rewards,
+                rewards + self.gamma * self.target_dqn(next_states)[torch.arange(batch_size), next_actions]
             )
         
-        # Update the DQN
-        self.dqn.update(states, targets)
+        # Update the DQNs
+        self.policy_dqn.update(states, targets)
+        if self.double:
+            self.update_target_dqn()
 
         # Apply epsilon decay
         if self.eps > self.eps_min:
@@ -128,24 +233,38 @@ class DQNAgent(Agent):
     def train(
         self,
         env: Env,
-        n_episodes: int,
+        episodes: int,
         *,
         batch_size: int = 128,
         evaluation_episodes: int = 100,
         apply_best_model: bool = False,
         show_progress: bool = True
-    ) -> Any:
+    ) -> List[float]:
+        """
+        Train the agent using the given environment for a specified number of episodes.
+        ### Parameters:
+        - env (`Env`): The environment in which the agent will be trained.
+        - n_episodes (`int`): The total number of episodes to run during training.
+        - batch_size (`int`): The size of the mini-batches used during experience replay.
+        - evaluation_episodes (`int`): The number of episodes used for evaluation during training to monitor the agent's performance.
+        - apply_best_model (`bool`): Whether to apply the best model found during training to the DQN.
+        - show_progress (`bool`): Whether to display the progress bar during training.
+        ### Returns:
+        - Learning history (`List[float]`)
+        """
+
         if show_progress:
             progress =tqdm(
-                range(n_episodes),
+                range(episodes),
                 desc="Training",
                 colour="green",
                 bar_format="{l_bar}{bar:50}{r_bar}")
         else:
-            progress = range(n_episodes)
+            progress = range(episodes)
 
+        history = []
         best_score = float("-inf")
-        best_model = deepcopy(self.dqn.state_dict())
+        best_model = deepcopy(self.policy_dqn.state_dict())
 
         for _ in progress:
             done = False
@@ -160,27 +279,42 @@ class DQNAgent(Agent):
             # Learn from the memory
             self.replay(batch_size)
             
-            # Wait for the memory to fill before start evaluating
-            if len(self.memory) >= batch_size and evaluation_episodes > 0:
+            # Wait for the memory to fill up before start evaluating
+            if evaluation_episodes > 0 and len(self.memory) >= batch_size:
                 score = self.evaluate(env, evaluation_episodes)
+                history.append(score)
                 if score > best_score:
                     best_score = score
-                    best_model = deepcopy(self.dqn.state_dict())
+                    best_model = deepcopy(self.policy_dqn.state_dict())
 
                 # Show the score on the progress bar (if enabled)
                 if show_progress:
-                    progress.set_postfix(score=best_score)
+                    score_track = best_score if apply_best_model else score
+                    progress.set_postfix(score=score_track)
+
         
         # Load the best model into DQN (if enabled)
         if apply_best_model:
-            self.dqn.load_state_dict(best_model)
+            self.policy_dqn.load_state_dict(best_model)
+        
+        return history
 
-    def evaluate(self, env: Env, n_episodes: int = 100) -> float:
+    def evaluate(self, env: Env, episodes: int = 100) -> float:
+        """
+        Evaluate the performance of the agent on the given environment by running a specified number of episodes.
+        Evaluation runs without exploration (epsilon is set to 0).
+        ### Parameters:
+        - env (`Env`): The environment in which the agent will be evaluated.
+        - n_episodes (`int`): The number of episodes to run for evaluation.
+        ### Returns:
+        - The evaluation score (`float`)
+        """
+
         eps = self.eps
         self.eps = 0
 
         score = 0
-        for _ in range(n_episodes):
+        for _ in range(episodes):
             done = False
             state = env.reset()
             while not done:
@@ -190,4 +324,8 @@ class DQNAgent(Agent):
                 
         self.eps = eps
 
-        return score / n_episodes
+        return score / episodes
+
+    def update_target_dqn(self) -> None:
+        for policy_param, target_param in zip(self.policy_dqn.parameters(), self.target_dqn.parameters()):
+            target_param.data.copy_(self.tau * policy_param.data + (1 - self.tau) * target_param.data)
