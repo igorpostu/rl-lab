@@ -6,11 +6,11 @@ from abc import ABC, abstractmethod
 class Env(ABC):
     
     @abstractmethod
-    def step(self, action: int) -> Tuple[ArrayLike, int, bool]:
+    def reset(self) -> ArrayLike:
         pass
 
     @abstractmethod
-    def reset(self) -> ArrayLike:
+    def step(self, action: int) -> Tuple[ArrayLike, int, bool]:
         pass
 
     @abstractmethod

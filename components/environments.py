@@ -18,23 +18,29 @@ class CartPoleEnv(Env):
         self.action_space = self.env.action_space
         self.observation_space = self.env.observation_space
 
+        self.n_actions = self.action_space.n
+        self.n_observations = self.observation_space.size[0]
+
     def reset(self) -> ArrayLike:
         state, _ = self.env.reset()
         return state
 
-    def step(self, action: int) -> Tuple[ArrayLike, float, bool]:
+    def step(self, action: int) -> Tuple[ArrayLike, int, bool]:
         observation, reward, terminated, truncated, _ = self.env.step(action)
         reward = -10 if terminated else reward
 
         return observation, int(reward), terminated or truncated
     
     def render(self) -> None:
-        pass
+        self.env.render()
 
 class TicTacToeEnv(Env):
     def __init__(self, *, opponent: Agent = None, random_action_chance: float = 0.5) -> None:
         self.action_space = Discrete(9)
         self.observation_space = Box(-1, 1, (9,), dtype=np.int8)
+
+        self.n_actions = self.action_space.n
+        self.n_observations = self.observation_space.size[0]
 
         self.opponent = opponent
         self.random_action_chance = random_action_chance
@@ -63,7 +69,7 @@ class TicTacToeEnv(Env):
             return self.get_state(), self.get_reward(), self.done
         
         self.board[row, col] = 1
-        self.check_winner()
+        self.winner = self.get_winner()
         self.done = bool(self.is_full() or self.winner)
 
         if not self.done:
@@ -84,7 +90,7 @@ class TicTacToeEnv(Env):
         if self.opponent and random.random() > self.random_action_chance:
             state = self.get_state() * -1
             action = self.opponent.act(state)
-            action = action if action in available_actions else random.choice(available_actions)
+            action = action if action in available_actions else np.random.choice(available_actions)
         else:
             action = random.choice(available_actions)
 
@@ -92,35 +98,29 @@ class TicTacToeEnv(Env):
         col = action % 3
 
         self.board[row, col] = -1
-        self.check_winner()
+        self.winner = self.get_winner()
         self.done = bool(self.is_full() or self.winner)
 
-    def check_winner(self) -> int:
+    def get_winner(self) -> int:
         # Check rows
         for row in self.board:
             if np.all(row == 1):
-                self.winner = 1
-                return
+                return 1
             if np.all(row == -1):
-                self.winner = -1
-                return
+                return -1
 
         # Check columns
         for col in self.board.T:
             if np.all(col == 1):
-                self.winner = 1
-                return
+                return 1
             if np.all(col == -1):
-                self.winner = -1
-                return
+                return -1
             
         # Check diagonals
         if np.all(np.diag(self.board) == 1) or np.all(np.diag(np.fliplr(self.board)) == 1):
-            self.winner = 1
-            return
+            return 1
         if np.all(np.diag(self.board) == -1) or np.all(np.diag(np.fliplr(self.board)) == -1):
-            self.winner = -1
-            return
+            return -1
 
     def is_full(self) -> bool:
         return bool(np.count_nonzero(self.board) == 9)
