@@ -1,4 +1,5 @@
-from typing import Tuple
+import numpy as np
+from typing import Tuple, NamedTuple, List
 from numpy.typing import ArrayLike
 from abc import ABC, abstractmethod
 
@@ -24,7 +25,7 @@ class Agent(ABC):
         pass
 
     @abstractmethod
-    def remember(self, state: ArrayLike, action: int, reward: int, next_state: ArrayLike, done: bool) -> None:
+    def remember(self, *transition) -> None:
         pass
 
     @abstractmethod
@@ -37,4 +38,14 @@ class Agent(ABC):
     
     @abstractmethod
     def evaluate(self, env: Env, n_episodes: int = 100) -> float:
+        pass
+
+class Memory(ABC):
+
+    @abstractmethod
+    def push(self, *transition) -> None:
+        pass
+
+    @abstractmethod
+    def sample(self, batch_size: int = 1) -> List[NamedTuple]:
         pass
